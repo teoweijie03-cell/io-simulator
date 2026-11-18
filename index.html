@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>I/O Simulator: Polling vs Interrupt vs DMA</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@600;800&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+:root{--bg:#eef2f4;--panel:#fff;--ink:#14232b;--mute:#566a75;--line:#cfd9de;
+--work:#2f9e6e;--poll:#e0a526;--cmd:#7a8b95;--isr:#3b6fd4;--dma:#8a5bd0;--idle:#e3eaee;--busy:#14232b;
+color-scheme:light;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#0f1a20;--panel:#172831;--ink:#e6eef2;--mute:#9db1bb;--line:#2b414c;--idle:#223540;--busy:#e6eef2;--cmd:#6f8591;color-scheme:dark}}
+*{box-sizing:border-box}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+body{margin:0;background:var(--bg);color:var(--ink);font:400 15px/1.55 "IBM Plex Sans",system-ui,sans-serif}
+main{max-width:860px;margin:0 auto;padding:20px 16px 48px}
+h1{font:800 clamp(26px,5vw,38px)/1.1 "Bricolage Grotesque",system-ui,sans-serif;margin:8px 0 6px;letter-spacing:-.02em}
+h2{font:600 17px "Bricolage Grotesque",system-ui,sans-serif;margin:0 0 10px}
+.lead{color:var(--mute);margin:0 0 18px;max-width:62ch}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px;margin-bottom:14px}
+.tabs{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px}
+.tab{font:600 14px "IBM Plex Sans",sans-serif;padding:8px 14px;border-radius:8px;border:1.5px solid var(--line);background:transparent;color:var(--ink);cursor:pointer}
+.tab[aria-pressed=true]{background:var(--ink);color:var(--bg);border-color:var(--ink)}
+button:focus-visible,input:focus-visible{outline:3px solid var(--isr);outline-offset:2px}
+.ctrl{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px;margin-bottom:12px}
+label{display:block;font-weight:500;margin-bottom:2px}
+label b{font-weight:600}
+input[type=range]{width:100%}
+.hint{color:var(--mute);font-size:13px}
+.run{display:flex;gap:8px;flex-wrap:wrap}
+.btn{font:600 14px "IBM Plex Sans",sans-serif;padding:9px 18px;border-radius:8px;border:0;background:var(--isr);color:#fff;cursor:pointer}
+.btn.alt{background:transparent;color:var(--ink);border:1.5px solid var(--line)}
+.lanes{display:grid;grid-template-columns:42px 1fr;gap:6px;align-items:start}
+.lane-l{font-size:12px;color:var(--mute);line-height:1}
+.lane-l div{height:14px;margin-bottom:2px;display:flex;align-items:center}
+.lane-l div:first-child{margin-bottom:2px}
+#tl{display:flex;flex-wrap:wrap;gap:6px 1px;min-height:34px}
+.col{width:11px}
+.col i{display:block;height:14px;margin-bottom:2px;border-radius:2px;background:var(--idle)}
+.col i.d.on{background:var(--busy)}
+.s-work{background:var(--work)!important}.s-poll{background:var(--poll)!important}.s-cmd,.s-copy{background:var(--cmd)!important}
+.s-isr{background:var(--isr)!important}.s-setup,.s-steal{background:var(--dma)!important}
+.legend{display:flex;flex-wrap:wrap;gap:6px 16px;margin-top:12px;font-size:13px;color:var(--mute)}
+.legend span::before{content:"";display:inline-block;width:11px;height:11px;border-radius:2px;margin-right:6px;vertical-align:-1px;background:var(--c)}
+#say{margin:12px 0 0;min-height:48px;font-weight:500}
+.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:12px}
+.stat{border:1px solid var(--line);border-radius:8px;padding:8px 10px}
+.stat small{display:block;color:var(--mute);font-size:12px}
+.stat strong{font:800 22px "Bricolage Grotesque",sans-serif}
+.cmp{display:grid;grid-template-columns:96px 1fr 52px;gap:6px 10px;align-items:center;font-size:14px}
+.bar{height:16px;background:var(--idle);border-radius:4px;overflow:hidden}
+.bar>div{height:100%;transition:width .35s}
+.cmp .hd{color:var(--mute);font-size:12px}
+.take{border-left:4px solid var(--poll);padding:4px 0 4px 12px;margin:0}
+.quiz button{display:block;width:100%;text-align:left;margin:6px 0}
+.quiz .ok{border-color:var(--work);color:var(--work)}.quiz .no{border-color:#d4483b;color:#d4483b}
+@media (prefers-reduced-motion:reduce){.bar>div{transition:none}}
+</style>
+</head>
+<body>
+<main>
+<h1>How does the CPU talk to a slow device?</h1>
+<p class="lead">Pick an I/O method, set how slow the device is, and watch what the CPU does with every tick. Based on Topic 4 of TTTK 1153: Computer Organization &amp; Architecture.</p>
+
+<section class="panel" aria-label="Simulator">
+  <div class="tabs" role="group" aria-label="I/O method">
+    <button class="tab" data-m="poll" aria-pressed="true">Polling (programmed I/O)</button>
+    <button class="tab" data-m="int" aria-pressed="false">Interrupt-driven</button>
+    <button class="tab" data-m="dma" aria-pressed="false">DMA</button>
+  </div>
+  <div class="ctrl">
+    <div><label for="D">Device delay per word: <b id="Dv">6</b> ticks</label><input id="D" type="range" min="1" max="12" value="6"><div class="hint">Keyboard = very slow. Fast SSD = small.</div></div>
+    <div><label for="N">Words to transfer: <b id="Nv">4</b></label><input id="N" type="range" min="2" max="8" value="4"><div class="hint">The CPU also has a background program to run.</div></div>
+  </div>
+  <div class="run"><button class="btn" id="go">Run</button><button class="btn alt" id="rs">Reset</button></div>
+
+  <div class="lanes" style="margin-top:16px">
+    <div class="lane-l"><div>CPU</div><div>Device</div></div>
+    <div id="tl" aria-live="off"></div>
+  </div>
+  <div class="legend">
+    <span style="--c:var(--work)">Useful work</span><span style="--c:var(--poll)">Busy-waiting (polling)</span>
+    <span style="--c:var(--cmd)">Command / copy word</span><span style="--c:var(--isr)">Interrupt handler</span>
+    <span style="--c:var(--dma)">DMA setup / cycle stealing</span><span style="--c:var(--busy)">Device busy</span>
+  </div>
+  <p id="say" aria-live="polite">Press Run to start.</p>
+  <div class="stats">
+    <div class="stat"><small>Ticks used</small><strong id="sT">0</strong></div>
+    <div class="stat"><small>CPU useful work</small><strong id="sU">0%</strong></div>
+    <div class="stat"><small>Wasted waiting</small><strong id="sW">0</strong></div>
+  </div>
+</section>
+
+<section class="panel">
+  <h2>Compare all three with your settings</h2>
+  <div class="cmp" id="cmp"></div>
+  <p class="hint" style="margin:10px 0 0">Longer bar = more ticks to finish (top) or more CPU time spent on useful work (bottom).</p>
+</section>
+
+<section class="panel">
+  <h2>What to notice</h2>
+  <p class="take" id="take"></p>
+  <p class="hint" style="margin-bottom:0">Try delay = 1, then delay = 12. When does interrupt-driven I/O stop being worth its overhead?</p>
+</section>
+
+<section class="panel quiz">
+  <h2>Check yourself</h2>
+  <p id="qq" style="margin-top:0"></p><div id="qa"></div><p class="hint" id="qf" style="margin-bottom:0"></p>
+</section>
+</main>
+<script>
+(function(){
+var M="poll",timer=null,seq=[],shown=0;
+var $=function(i){return document.getElementById(i)};
+var names={poll:"Polling",int:"Interrupt-driven",dma:"DMA"};
+var say={
+cmd:"CPU sends a read command to the I/O module.",
+poll:"CPU keeps checking the device status register: not ready yet. This tick is wasted.",
+copy:"Device is ready. CPU copies the word from the I/O data register to memory.",
+work:"CPU runs its background program while the device works.",
+isr:"Interrupt! CPU saves its state, runs the interrupt service routine, then resumes.",
+setup:"CPU gives the DMA controller the address, count and direction. Then it is free.",
+steal:"DMA controller borrows the bus for one cycle to move a word. CPU pauses briefly."
+};
+function build(m,D,N){
+ var s=[],w,k;
+ function add(c,d,n){for(var i=0;i<n;i++)s.push({c:c,d:d})}
+ if(m==="poll"){for(w=0;w<N;w++){add("cmd",0,1);add("poll",1,D);add("copy",0,1)}}
+ else if(m==="int"){for(w=0;w<N;w++){add("cmd",0,1);add("work",1,D);add("isr",0,3)}}
+ else{add("setup",0,3);for(w=0;w<N;w++){add("work",1,D);add("steal",1,1)}add("isr",0,3)}
+ return s}
+function calc(m,D,N){var s=build(m,D,N),u=0,p=0;s.forEach(function(x){if(x.c==="work")u++;if(x.c==="poll")p++});
+ return{t:s.length,u:u,p:p,pct:Math.round(100*u/s.length)}}
+function draw(upto){
+ var tl=$("tl");tl.innerHTML="";
+ seq.forEach(function(x,i){var c=document.createElement("div");c.className="col";
+  var a=document.createElement("i"),b=document.createElement("i");b.className="d";
+  if(i<upto){a.className="s-"+x.c;if(x.d)b.className="d on"}
+  c.appendChild(a);c.appendChild(b);tl.appendChild(c)})}
+function stats(upto){var u=0,p=0;for(var i=0;i<upto;i++){if(seq[i].c==="work")u++;if(seq[i].c==="poll")p++}
+ $("sT").textContent=upto;$("sU").textContent=upto?Math.round(100*u/upto)+"%":"0%";$("sW").textContent=p}
+function params(){return{D:+$("D").value,N:+$("N").value}}
+function reset(){clearInterval(timer);timer=null;var p=params();seq=build(M,p.D,p.N);shown=0;draw(0);stats(0);
+ $("say").textContent="Press Run to start.";$("go").textContent="Run"}
+function step(){
+ if(shown>=seq.length){clearInterval(timer);timer=null;var r=calc(M,params().D,params().N);
+  $("say").textContent="Done in "+r.t+" ticks. CPU did useful work for "+r.pct+"% of them.";$("go").textContent="Run again";return}
+ shown++;draw(shown);stats(shown);$("say").textContent=say[seq[shown-1].c]}
+function compare(){
+ var p=params(),h='<span class="hd"></span><span class="hd">Total ticks</span><span class="hd"></span>',r={},mx=0,k;
+ ["poll","int","dma"].forEach(function(m){r[m]=calc(m,p.D,p.N);mx=Math.max(mx,r[m].t)});
+ var col={poll:"var(--poll)",int:"var(--isr)",dma:"var(--dma)"};
+ ["poll","int","dma"].forEach(function(m){h+='<span>'+names[m]+'</span><div class="bar"><div style="width:'+(100*r[m].t/mx)+'%;background:'+col[m]+'"></div></div><span>'+r[m].t+'</span>'});
+ h+='<span class="hd"></span><span class="hd">CPU useful work</span><span class="hd"></span>';
+ ["poll","int","dma"].forEach(function(m){h+='<span>'+names[m]+'</span><div class="bar"><div style="width:'+r[m].pct+'%;background:var(--work)"></div></div><span>'+r[m].pct+'%</span>'});
+ $("cmp").innerHTML=h;
+ var t;
+ if(r.poll.t<r.int.t)t="With a fast device (delay "+p.D+"), polling finishes sooner than interrupts ("+r.poll.t+" vs "+r.int.t+" ticks). Handling an interrupt costs time, so it only pays off when the wait is long.";
+ else t="With a slow device (delay "+p.D+"), polling wastes "+r.poll.p+" ticks just checking. Interrupt-driven I/O gives that time back to the CPU. DMA does best for bulk transfers because the CPU is interrupted once, not once per word.";
+ $("take").textContent=t}
+function upd(){$("Dv").textContent=$("D").value;$("Nv").textContent=$("N").value;reset();compare()}
+$("D").addEventListener("input",upd);$("N").addEventListener("input",upd);
+$("rs").addEventListener("click",reset);
+$("go").addEventListener("click",function(){if(timer)return;if(shown>=seq.length)reset();timer=setInterval(step,70)});
+document.querySelectorAll(".tab").forEach(function(b){b.addEventListener("click",function(){
+ M=b.dataset.m;document.querySelectorAll(".tab").forEach(function(x){x.setAttribute("aria-pressed",x===b)});reset()})});
+var Q=[
+{q:"The CPU repeatedly reads a status register until the device is ready. What is this called?",o:["Interrupt handling","Busy-waiting (polling)","Cycle stealing"],a:1,f:"Polling wastes CPU time when the device is slower than the processor."},
+{q:"Which method lets the device signal the CPU only when it is ready?",o:["Interrupt-driven I/O","Programmed I/O","Memory-mapped I/O"],a:0,f:"The CPU runs other work and handles an interrupt service routine when the device finishes."},
+{q:"For a large block of data, which method involves the CPU the least?",o:["Polling","Interrupt-driven I/O","DMA"],a:2,f:"The DMA controller moves data between device and memory and interrupts the CPU once at the end."}];
+var qi=0;
+function showQ(){var q=Q[qi];$("qq").textContent=q.q;$("qf").textContent="Question "+(qi+1)+" of "+Q.length;var a=$("qa");a.innerHTML="";
+ q.o.forEach(function(t,i){var b=document.createElement("button");b.className="tab";b.textContent=t;
+  b.onclick=function(){var ok=i===q.a;b.className="tab "+(ok?"ok":"no");$("qf").textContent=(ok?"Correct. ":"Not quite. ")+q.f;
+   if(ok){setTimeout(function(){qi=(qi+1)%Q.length;showQ()},2200)}};a.appendChild(b)})}
+showQ();upd();
+})();
+</script>
+</body>
+</html>
